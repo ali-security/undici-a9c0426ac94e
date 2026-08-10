@@ -421,3 +421,97 @@ test('Raw uncompressed payload over 64-bit extended limit is rejected', async (t
   assert.strictEqual(messageReceived, false, 'Raw uncompressed message over limit should be rejected')
   assert.strictEqual(client.readyState, WebSocket.CLOSED, 'Connection should be closed after exceeding limit')
 })
+
+test('cumulative payload size', (t, done) => {
+  const LIMIT = 100
+  const FRAGMENT_SIZE = 60
+  const NUM_FRAGMENTS = 10
+
+  const server = new WebSocketServer({ port: 0 })
+
+  server.on('connection', (ws) => {
+    const socket = ws._socket
+    const payload = Buffer.alloc(FRAGMENT_SIZE, 0x41)
+
+    for (let i = 0; i < NUM_FRAGMENTS; i++) {
+      const fin = i === NUM_FRAGMENTS - 1 ? 0x80 : 0x00
+      const opcode = i === 0 ? 0x02 : 0x00
+      const header = Buffer.alloc(2)
+      header[0] = fin | opcode
+      header[1] = FRAGMENT_SIZE
+      socket.write(header)
+      socket.write(payload)
+    }
+  })
+
+  const agent = new Agent({
+    webSocket: {
+      maxPayloadSize: LIMIT
+    }
+  })
+
+  const client = new WebSocket(`ws://127.0.0.1:${server.address().port}`, { dispatcher: agent })
+
+  t.after(async () => {
+    client.close()
+    server.close()
+    await agent.close()
+  })
+
+  client.onmessage = () => assert.fail('message should not be received')
+
+  client.addEventListener('error', (event) => {
+    assert.ok(event)
+    done()
+  })
+})
+
+test('Continuation frame announcing more than the remaining budget is rejected before its body arrives', (t, done) => {
+  const LIMIT = 100
+  const FRAGMENT_SIZE = 100
+
+  const server = new WebSocketServer({ port: 0 })
+
+  server.on('connection', (ws) => {
+    const socket = ws._socket
+
+    // First fragment sits exactly on the limit, so the byte count checked
+    // after it is buffered does not trip.
+    const header = Buffer.alloc(2)
+    header[0] = 0x02 // fin=0, opcode=binary
+    header[1] = FRAGMENT_SIZE
+    socket.write(header)
+    socket.write(Buffer.alloc(FRAGMENT_SIZE, 0x41))
+
+    // Only the header of the second fragment is written. It announces another
+    // FRAGMENT_SIZE bytes, which cannot fit alongside what is already
+    // buffered, so the announced length must be checked against the remaining
+    // budget instead of the limit alone -- otherwise the parser waits on (and
+    // buffers) a payload that is already known to be over the limit.
+    const continuation = Buffer.alloc(2)
+    continuation[0] = 0x80 // fin=1, opcode=continuation
+    continuation[1] = FRAGMENT_SIZE
+    socket.write(continuation)
+  })
+
+  const agent = new Agent({
+    webSocket: {
+      maxPayloadSize: LIMIT
+    }
+  })
+
+  const client = new WebSocket(`ws://127.0.0.1:${server.address().port}`, { dispatcher: agent })
+
+  t.after(async () => {
+    client.close()
+    server.close()
+    await agent.close()
+  })
+
+  client.onmessage = () => assert.fail('message should not be received')
+
+  client.addEventListener('error', (event) => {
+    assert.ok(event)
+    done()
+  })
+})
