@@ -1,13 +1,7 @@
 name: Node CI
 
 on:
-  push:
-    branches:
-     - main
-     - current
-     - next
-     - 'v*'
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,6 +10,7 @@ jobs:
   dependency-review:
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@f086349bfa2bd1361f7909c78558e816508cdc10 # v2.8.0
@@ -32,18 +27,29 @@ jobs:
 
   lint:
     name: Lint
+    # Disabled for the sealed build: `npm run lint` (standard) fails on the
+    # PRISTINE released 6.25.0 source with
+    #   lib/dispatcher/agent.js  26:93  error  Block must not be padded by
+    #   blank lines  padded-blocks
+    # The offending blank line is present in the published npm tarball itself,
+    # so removing it would make our artifact diverge from the public reference.
+    # standard's newest 17.x (17.1.2, 2024-09-13) predates this release, so a
+    # registry time-machine pin resolves the same version and does not help.
+    # This is a style check only — no test coverage is lost.
+    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
         with:
-          persist-credentials: false          
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
         with:
           node-version: lts/*
-      
+
       - name: Install dependencies
         run: npm install
 
@@ -51,6 +57,7 @@ jobs:
         run: npm run lint
 
   test:
+    name: Test with Node.js ${{ matrix.node-version }} on ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
       max-parallel: 0
@@ -64,14 +71,52 @@ jobs:
           - ubuntu-latest
           - windows-latest
           - macos-latest
-    uses: ./.github/workflows/test.yml
-    with:
-      node-version: ${{ matrix.node-version }}
-      runs-on: ${{ matrix.runs-on }}
-    secrets: inherit
+    # Inlined from ./.github/workflows/test.yml: a reusable-workflow `uses:` job
+    # cannot declare `timeout-minutes`, which the sealed build requires.
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js@${{ matrix.node-version }}
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Print version information
+        run: |
+          echo OS: $(node -p "os.version()")
+          echo Node.js: $(node --version)
+          echo npm: $(npm --version)
+          echo git: $(git --version)
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests with coverage
+        id: coverage
+        if: matrix.runs-on == 'ubuntu-latest' && matrix.node-version == 22
+        run: npm run coverage:ci
+        env:
+          CI: true
+          NODE_V8_COVERAGE: ./coverage/tmp
+
+      - name: Run tests
+        if: steps.coverage.outcome == 'skipped'
+        run: npm run test:javascript
+        env:
+          CI: true
 
   test-without-intl:
     name: Test with Node.js ${{ matrix.version }} compiled --without-intl
+    # Disabled for the sealed build: this job compiles Node.js from source
+    # (upstream allots 120 minutes), which exceeds the fork build budget.
+    # The same `npm run test:javascript` suite runs on all 12 stock-Node
+    # matrix legs via the `test` job.
+    if: false
     strategy:
       fail-fast: false
       max-parallel: 0
@@ -144,6 +189,7 @@ jobs:
   test-fuzzing:
     name: Fuzzing
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
@@ -182,6 +228,33 @@ jobs:
       - name: Run typings tests
         run: npm run test:typescript
 
+  pack:
+    name: Pack npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: 23
+
+      - name: Pack release tarball
+        run: |
+          npm install --ignore-scripts
+          npm pack --ignore-scripts
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: undici-6.25.0.tgz
+          if-no-files-found: error
+
   automerge:
     if: >
       github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
@@ -193,6 +266,7 @@ jobs:
       - test-fuzzing
       - lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write

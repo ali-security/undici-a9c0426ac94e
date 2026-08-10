@@ -1615,7 +1615,11 @@ describe('node-fetch', () => {
     })
   })
 
-  it('should support http request', { timeout: 5000 }, function () {
+  // Timeout raised from 5000ms: this is the only test in the suite that leaves
+  // the runner and performs a live HEAD against https://github.com/, and 5s is
+  // not enough headroom for that round-trip on a loaded CI runner (it timed out
+  // on the Node 20 / ubuntu-latest leg). The test itself is unchanged.
+  it('should support http request', { timeout: 30000 }, function () {
     const url = 'https://github.com/'
     const options = {
       method: 'HEAD'
